@@ -2,6 +2,9 @@
 name: Aplicar capa no Notion
 
 on:
+  push:
+    paths:
+      - 'Cover.webp'
   workflow_dispatch:
     inputs:
       dry_run:
