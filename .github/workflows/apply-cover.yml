@@ -1,0 +1,85 @@
+
+name: Aplicar capa no Notion
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_id:
+        description: "ID da pagina do Notion"
+        required: true
+        type: string
+      cover_url:
+        description: "URL publica da imagem de capa"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apply_cover:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Aplicar capa em uma pagina
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_UNDERSCORE_TOKEN }}
+          PAGE_ID: ${{ inputs.page_id }}
+          COVER_URL: ${{ inputs.cover_url }}
+
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+          import uuid
+
+          token = os.environ.get("NOTION_TOKEN")
+          page_id = os.environ.get("PAGE_ID", "").strip()
+          cover_url = os.environ.get("COVER_URL", "").strip()
+
+          if not token:
+              raise SystemExit("Token do Notion ausente.")
+
+          try:
+              page_id = str(uuid.UUID(page_id))
+          except ValueError:
+              raise SystemExit("ID da pagina invalido.")
+
+          if not cover_url.startswith("https://"):
+              raise SystemExit("A imagem precisa de uma URL HTTPS.")
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Notion-Version": "2026-03-11",
+              "Content-Type": "application/json"
+          }
+
+          payload = {
+              "cover": {
+                  "type": "external",
+                  "external": {
+                      "url": cover_url
+                  }
+              }
+          }
+
+          request = urllib.request.Request(
+              f"https://api.notion.com/v1/pages/{page_id}",
+              data=json.dumps(payload).encode("utf-8"),
+              headers=headers,
+              method="PATCH"
+          )
+
+          try:
+              with urllib.request.urlopen(request) as response:
+                  result = json.load(response)
+              print("Capa aplicada com sucesso.")
+              print("Pagina:", result.get("id"))
+          except urllib.error.HTTPError as error:
+              detail = error.read().decode("utf-8")
+              raise SystemExit(
+                  f"Erro HTTP {error.code}: {detail}"
+              )
+          PY
