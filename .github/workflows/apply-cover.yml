@@ -4,14 +4,21 @@ name: Aplicar capa no Notion
 on:
   workflow_dispatch:
     inputs:
-      page_id:
-        description: "ID da pagina do Notion"
+      dry_run:
+        description: "Simular sem alterar paginas"
+        type: boolean
+        default: true
         required: true
-        type: string
-      cover_url:
-        description: "URL publica da imagem de capa"
+      max_pages:
+        description: "Maximo de paginas por execucao"
+        type: number
+        default: 10
         required: true
-        type: string
+      overwrite_existing:
+        description: "Substituir capas diferentes"
+        type: boolean
+        default: false
+        required: true
 
 permissions:
   contents: read
@@ -21,65 +28,153 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Aplicar capa em uma pagina
+      - name: Sincronizar capas
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_UNDERSCORE_TOKEN }}
-          PAGE_ID: ${{ inputs.page_id }}
-          COVER_URL: ${{ inputs.cover_url }}
-
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          OVERWRITE: ${{ inputs.overwrite_existing }}
         run: |
           python3 - <<'PY'
           import os
           import json
+          import time
           import urllib.request
           import urllib.error
-          import uuid
 
           token = os.environ.get("NOTION_TOKEN")
-          page_id = os.environ.get("PAGE_ID", "").strip()
-          cover_url = os.environ.get("COVER_URL", "").strip()
-
           if not token:
               raise SystemExit("Token do Notion ausente.")
 
-          try:
-              page_id = str(uuid.UUID(page_id))
-          except ValueError:
-              raise SystemExit("ID da pagina invalido.")
+          dry_run = os.environ["DRY_RUN"].lower() == "true"
+          overwrite = os.environ["OVERWRITE"].lower() == "true"
+          limit = int(os.environ["MAX_PAGES"])
 
-          if not cover_url.startswith("https://"):
-              raise SystemExit("A imagem precisa de uma URL HTTPS.")
+          if not 1 <= limit <= 100:
+              raise SystemExit("Use um limite entre 1 e 100.")
+
+          cover_url = (
+              "https://raw.githubusercontent.com/"
+              "clezari/uhuu-sim/main/Cover.webp"
+          )
 
           headers = {
               "Authorization": f"Bearer {token}",
               "Notion-Version": "2026-03-11",
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
           }
 
-          payload = {
-              "cover": {
-                  "type": "external",
-                  "external": {
-                      "url": cover_url
-                  }
+          def api(method, path, data):
+              url = "https://api.notion.com/v1" + path
+              payload = json.dumps(data).encode("utf-8")
+
+              for attempt in range(5):
+                  request = urllib.request.Request(
+                      url,
+                      data=payload,
+                      headers=headers,
+                      method=method,
+                  )
+                  try:
+                      with urllib.request.urlopen(
+                          request, timeout=30
+                      ) as response:
+                          return json.load(response)
+                  except urllib.error.HTTPError as error:
+                      if error.code == 429 and attempt < 4:
+                          delay = float(
+                              error.headers.get("Retry-After", "2")
+                          )
+                          time.sleep(max(delay, 1))
+                          continue
+                      detail = error.read().decode("utf-8")
+                      raise SystemExit(
+                          f"Erro HTTP {error.code}: {detail}"
+                      )
+
+              raise SystemExit("Limite de tentativas excedido.")
+
+          cursor = None
+          found = 0
+          candidates = []
+          skipped = 0
+
+          while True:
+              body = {
+                  "page_size": 100,
+                  "filter": {
+                      "property": "object",
+                      "value": "page",
+                  },
               }
-          }
+              if cursor:
+                  body["start_cursor"] = cursor
 
-          request = urllib.request.Request(
-              f"https://api.notion.com/v1/pages/{page_id}",
-              data=json.dumps(payload).encode("utf-8"),
-              headers=headers,
-              method="PATCH"
-          )
+              result = api("POST", "/search", body)
 
-          try:
-              with urllib.request.urlopen(request) as response:
-                  result = json.load(response)
-              print("Capa aplicada com sucesso.")
-              print("Pagina:", result.get("id"))
-          except urllib.error.HTTPError as error:
-              detail = error.read().decode("utf-8")
-              raise SystemExit(
-                  f"Erro HTTP {error.code}: {detail}"
+              for page in result.get("results", []):
+                  found += 1
+
+                  if page.get("in_trash"):
+                      skipped += 1
+                      continue
+
+                  cover = page.get("cover")
+                  current_url = None
+
+                  if cover:
+                      kind = cover.get("type")
+                      current_url = (
+                          cover.get(kind, {}).get("url")
+                          if kind else None
+                      )
+
+                  if current_url == cover_url:
+                      skipped += 1
+                      continue
+
+                  if cover and not overwrite:
+                      skipped += 1
+                      continue
+
+                  candidates.append(page)
+
+              if not result.get("has_more"):
+                  break
+
+              cursor = result.get("next_cursor")
+              if not cursor:
+                  raise SystemExit("Erro na paginacao.")
+
+          print("Paginas encontradas:", found)
+          print("Paginas ignoradas:", skipped)
+          print("Candidatas:", len(candidates))
+          print("Modo de simulacao:", dry_run)
+
+          selected = candidates[:limit]
+          updated = 0
+
+          for page in selected:
+              page_id = page["id"]
+              print("Pagina:", page_id)
+
+              if dry_run:
+                  print("SIMULACAO - nenhuma alteracao")
+                  continue
+
+              api(
+                  "PATCH",
+                  f"/pages/{page_id}",
+                  {
+                      "cover": {
+                          "type": "external",
+                          "external": {"url": cover_url},
+                      }
+                  },
               )
+              updated += 1
+              time.sleep(0.4)
+
+          print("Paginas atualizadas:", updated)
+          print("Execucao concluida.")
           PY
