@@ -14,11 +14,6 @@ on:
         type: number
         default: 10
         required: true
-      overwrite_existing:
-        description: "Substituir capas diferentes"
-        type: boolean
-        default: false
-        required: true
 
 permissions:
   contents: read
@@ -33,7 +28,7 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_UNDERSCORE_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          OVERWRITE: ${{ inputs.overwrite_existing }}
+          COVER_VERSION: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import os
@@ -47,16 +42,22 @@ jobs:
               raise SystemExit("Token do Notion ausente.")
 
           dry_run = os.environ["DRY_RUN"].lower() == "true"
-          overwrite = os.environ["OVERWRITE"].lower() == "true"
           limit = int(os.environ["MAX_PAGES"])
 
           if not 1 <= limit <= 100:
               raise SystemExit("Use um limite entre 1 e 100.")
 
-          cover_url = (
+          base_url = (
               "https://raw.githubusercontent.com/"
               "clezari/uhuu-sim/main/Cover.webp"
           )
+          legacy_url = (
+              "https://clezari.github.io/"
+              "uhuu-sim/Cover.webp"
+          )
+
+          version = os.environ["COVER_VERSION"][:12]
+          cover_url = base_url + "?v=" + version
 
           headers = {
               "Authorization": f"Bearer {token}",
@@ -88,16 +89,17 @@ jobs:
                           time.sleep(max(delay, 1))
                           continue
                       detail = error.read().decode("utf-8")
-                      raise SystemExit(
-                          f"Erro HTTP {error.code}: {detail}"
+                      raise RuntimeError(
+                          f"HTTP {error.code}: {detail}"
                       )
 
-              raise SystemExit("Limite de tentativas excedido.")
+              raise RuntimeError("Tentativas excedidas.")
 
           cursor = None
           found = 0
           candidates = []
-          skipped = 0
+          custom = 0
+          current = 0
 
           while True:
               body = {
@@ -113,53 +115,57 @@ jobs:
               result = api("POST", "/search", body)
 
               for page in result.get("results", []):
-                  found += 1
-
                   if page.get("in_trash"):
-                      skipped += 1
                       continue
 
+                  found += 1
                   cover = page.get("cover")
-                  current_url = None
 
-                  if cover:
-                      kind = cover.get("type")
-                      current_url = (
-                          cover.get(kind, {}).get("url")
-                          if kind else None
-                      )
-
-                  if current_url == cover_url:
-                      skipped += 1
+                  if not cover:
+                      candidates.append(page)
                       continue
 
-                  if cover and not overwrite:
-                      skipped += 1
+                  if cover.get("type") != "external":
+                      custom += 1
                       continue
 
-                  candidates.append(page)
+                  url = cover.get(
+                      "external", {}
+                  ).get("url", "")
+
+                  managed = (
+                      url.split("?")[0]
+                      in (base_url, legacy_url)
+                  )
+
+                  if not managed:
+                      custom += 1
+                  elif url == cover_url:
+                      current += 1
+                  else:
+                      candidates.append(page)
 
               if not result.get("has_more"):
                   break
 
               cursor = result.get("next_cursor")
               if not cursor:
-                  raise SystemExit("Erro na paginacao.")
+                  raise RuntimeError("Erro de paginacao.")
 
           print("Paginas encontradas:", found)
-          print("Paginas ignoradas:", skipped)
-          print("Candidatas:", len(candidates))
-          print("Modo de simulacao:", dry_run)
+          print("Capas personalizadas preservadas:", custom)
+          print("Capas padrao ja atualizadas:", current)
+          print("Paginas candidatas:", len(candidates))
+          print("Simulacao:", dry_run)
 
           selected = candidates[:limit]
           updated = 0
 
           for page in selected:
               page_id = page["id"]
-              print("Pagina:", page_id)
 
               if dry_run:
-                  print("SIMULACAO - nenhuma alteracao")
+                  print("SIMULACAO:", page_id)
                   continue
 
               api(
@@ -173,6 +179,7 @@ jobs:
                   },
               )
               updated += 1
+              print("Atualizada:", page_id)
               time.sleep(0.4)
 
           print("Paginas atualizadas:", updated)
