@@ -9,31 +9,31 @@ on:
         type: boolean
         default: true
         required: true
-      max_pages:
-        description: "Maximo de paginas por execucao"
-        type: number
-        default: 10
-        required: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: notion-cover-sync
+  cancel-in-progress: false
+
 jobs:
   apply_cover:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
 
     steps:
-      - name: Sincronizar capas
+      - name: Sincronizar todas as capas
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_UNDERSCORE_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
-          MAX_PAGES: ${{ inputs.max_pages }}
           COVER_VERSION: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import os
           import json
           import time
+          import random
           import urllib.request
           import urllib.error
 
@@ -42,15 +42,12 @@ jobs:
               raise SystemExit("Token do Notion ausente.")
 
           dry_run = os.environ["DRY_RUN"].lower() == "true"
-          limit = int(os.environ["MAX_PAGES"])
-
-          if not 1 <= limit <= 100:
-              raise SystemExit("Use um limite entre 1 e 100.")
 
           base_url = (
               "https://raw.githubusercontent.com/"
               "clezari/uhuu-sim/main/Cover.webp"
           )
+
           legacy_url = (
               "https://clezari.github.io/"
               "uhuu-sim/Cover.webp"
@@ -69,37 +66,63 @@ jobs:
               url = "https://api.notion.com/v1" + path
               payload = json.dumps(data).encode("utf-8")
 
-              for attempt in range(5):
+              for attempt in range(8):
                   request = urllib.request.Request(
                       url,
                       data=payload,
                       headers=headers,
                       method=method,
                   )
+
                   try:
                       with urllib.request.urlopen(
-                          request, timeout=30
+                          request, timeout=45
                       ) as response:
                           return json.load(response)
+
                   except urllib.error.HTTPError as error:
-                      if error.code == 429 and attempt < 4:
+                      if error.code == 429:
                           delay = float(
-                              error.headers.get("Retry-After", "2")
+                              error.headers.get(
+                                  "Retry-After", "3"
+                              )
                           )
-                          time.sleep(max(delay, 1))
-                          continue
-                      detail = error.read().decode("utf-8")
-                      raise RuntimeError(
-                          f"HTTP {error.code}: {detail}"
-                      )
+                      elif error.code in (500, 502, 503, 504):
+                          delay = min(2 ** attempt, 30)
+                      else:
+                          detail = error.read().decode("utf-8")
+                          raise RuntimeError(
+                              f"HTTP {error.code}: {detail}"
+                          )
+
+                      if attempt == 7:
+                          raise RuntimeError(
+                              f"API indisponivel: HTTP {error.code}"
+                          )
+
+                      time.sleep(delay + random.uniform(0, 0.3))
 
               raise RuntimeError("Tentativas excedidas.")
 
+          def get_cover_url(page):
+              cover = page.get("cover")
+
+              if not cover:
+                  return None, None
+
+              kind = cover.get("type")
+              url = cover.get(kind, {}).get("url", "")
+
+              return kind, url
+
+          print("Iniciando sincronizacao")
+          print("Simulacao:", dry_run)
+
           cursor = None
           found = 0
-          candidates = []
           custom = 0
           current = 0
+          candidates = []
 
           while True:
               body = {
@@ -109,6 +132,7 @@ jobs:
                       "value": "page",
                   },
               }
+
               if cursor:
                   body["start_cursor"] = cursor
 
@@ -119,19 +143,16 @@ jobs:
                       continue
 
                   found += 1
-                  cover = page.get("cover")
 
-                  if not cover:
+                  kind, url = get_cover_url(page)
+
+                  if kind is None:
                       candidates.append(page)
                       continue
 
-                  if cover.get("type") != "external":
+                  if kind != "external":
                       custom += 1
                       continue
-
-                  url = cover.get(
-                      "external", {}
-                  ).get("url", "")
 
                   managed = (
                       url.split("?")[0]
@@ -149,39 +170,62 @@ jobs:
                   break
 
               cursor = result.get("next_cursor")
+
               if not cursor:
                   raise RuntimeError("Erro de paginacao.")
 
           print("Paginas encontradas:", found)
-          print("Capas personalizadas preservadas:", custom)
-          print("Capas padrao ja atualizadas:", current)
+          print("Capas personalizadas:", custom)
+          print("Capas padrao atualizadas:", current)
           print("Paginas candidatas:", len(candidates))
-          print("Simulacao:", dry_run)
 
-          selected = candidates[:limit]
+          if dry_run:
+              print("SIMULACAO: nenhuma pagina alterada")
+              print("Execucao concluida.")
+              raise SystemExit(0)
+
           updated = 0
+          errors = 0
 
-          for page in selected:
+          for index, page in enumerate(candidates, 1):
               page_id = page["id"]
 
-              if dry_run:
-                  print("SIMULACAO:", page_id)
-                  continue
+              try:
+                  api(
+                      "PATCH",
+                      f"/pages/{page_id}",
+                      {
+                          "cover": {
+                              "type": "external",
+                              "external": {
+                                  "url": cover_url
+                              },
+                          }
+                      },
+                  )
+                  updated += 1
 
-              api(
-                  "PATCH",
-                  f"/pages/{page_id}",
-                  {
-                      "cover": {
-                          "type": "external",
-                          "external": {"url": cover_url},
-                      }
-                  },
-              )
-              updated += 1
-              print("Atualizada:", page_id)
+              except Exception as error:
+                  errors += 1
+                  print(
+                      f"Erro na pagina {page_id}: {error}",
+                      flush=True,
+                  )
+
+              if index % 100 == 0:
+                  print(
+                      f"Progresso: {index}/{len(candidates)}",
+                      flush=True,
+                  )
+
               time.sleep(0.4)
 
           print("Paginas atualizadas:", updated)
-          print("Execucao concluida.")
+          print("Erros:", errors)
+          print("Sincronizacao concluida.")
+
+          if errors:
+              raise SystemExit(
+                  f"Execucao com {errors} erros."
+              )
           PY
