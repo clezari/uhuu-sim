@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Consultar Notion
         env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_UNDERSCORE_TOKEN }}
         run: |
           python3 - <<'PY'
           import os
