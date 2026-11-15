@@ -1,0 +1,72 @@
+
+name: Testar acesso ao Notion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consultar Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+
+          token = os.environ.get("NOTION_TOKEN")
+          if not token:
+              raise SystemExit("Erro: NOTION_TOKEN nao configurado.")
+
+          cursor = None
+          pages = 0
+          data_sources = 0
+
+          while True:
+              body = {"page_size": 100}
+              if cursor:
+                  body["start_cursor"] = cursor
+
+              request = urllib.request.Request(
+                  "https://api.notion.com/v1/search",
+                  data=json.dumps(body).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Notion-Version": "2026-03-11",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      result = json.load(response)
+              except urllib.error.HTTPError as error:
+                  raise SystemExit(
+                      f"Erro na API do Notion: HTTP {error.code}"
+                  )
+
+              for item in result.get("results", []):
+                  if item.get("object") == "page":
+                      pages += 1
+                  elif item.get("object") == "data_source":
+                      data_sources += 1
+
+              if not result.get("has_more"):
+                  break
+
+              cursor = result.get("next_cursor")
+              if not cursor:
+                  raise SystemExit("Erro na paginacao.")
+
+          print(f"Paginas encontradas: {pages}")
+          print(f"Fontes de dados encontradas: {data_sources}")
+          print("Teste de leitura concluido.")
+          PY
